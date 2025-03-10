@@ -611,3 +611,443 @@ namespace CounterApp
 之所以叫做`ViewController`，因为在unity中难以区分View和Controller概念，View可以理解为感兴趣的组件应用，比如此示例中的两个按钮和一个文本框。只需要继承`MonoBehaviour`就可以轻松获取这些组件，因此单独创建`View`脚本比较浪费
 
 可以理解为：一个脚本由于挂载在`GameObject`上，所以它既有View的职责，也有Controller的职责
+
+接下来需要考虑表现逻辑和交互逻辑应该使用怎样的交互方法比较合适。在原先的代码中，表现逻辑是在交互逻辑之后马上进行了调用：
+
+```csharp
+transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+{
+    CounterModel.Count++; // 交互逻辑
+    UpdateView(); // 表现逻辑
+});
+```
+
+因此此处使用的是单纯的方法调用，在Controller中获取`Model`对象，然后将这个对象的`Count`数据显示在View上
+
+如果采用委托调用方式，View只需要监听`CounterModel`的数据变化就可以。首先更改`CounterModel`：
+
+```csharp
+// CounterViewContrller.cs
+public static class CounterModel
+{
+    private static int mCount = 0;
+
+    public static Action<int> OnCountChanged;
+
+    public static int Count
+    {
+        get => mCount;
+        set
+        {
+            if (value != mCount) { mCount = value; }
+
+            OnCountChanged?.Invoke(value); // 当存储数据发生变化，触发委托
+        }
+    }
+}
+```
+
+然后在`ViewController`中需要监听`OnCountChanged`委托：
+
+```csharp
+// CounterViewContrller.cs
+public class CounterViewController : MonoBehaviour
+{
+    private void Start()
+    {
+        CounterModel.OnCountChanged += OnCountChanged;
+
+        OnCountChanged(CounterModel.Count); // 在初始化时要主动调用一次表现逻辑
+
+        transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+        {
+            CounterModel.Count++; // 交互逻辑
+        });
+
+        transform.Find("BtnSub").GetComponent<Button>().onClick.AddListener(() =>
+        {
+            CounterModel.Count--; // 交互逻辑
+        });
+    }
+
+    private void OnCountChanged(int newCount)
+    {
+        transform.Find("CountText").GetComponent<Text>().text = newCount.ToString();
+    }
+
+    private void OnDestroy()
+    {
+        CounterModel.OnCountChanged -= OnCountChanged;
+    }
+}
+```
+
+此时变成了交互逻辑使用View调用Model，而表现逻辑是在Model内部值改变的时候通过委托通知View改变
+
+还可以通过事件/消息的方式进行交互。首先修改Model内容，每次值改变的时候触发事件，同时需要新定义一个继承之前写的事件泛型的事件：
+
+```csharp
+// CounterViewContrller.cs
+public static class CounterModel
+{
+    private static int mCount = 0;
+
+    public static int Count
+    {
+        get => mCount;
+        set
+        {
+            if (value != mCount) { mCount = value; }
+
+            OnCountChangedEvent.Trigger();
+        }
+    }
+}
+
+public class OnCountChangedEvent : Event<OnCountChangedEvent>
+{
+
+}
+```
+
+然后同样要再Controller中监听事件：
+
+```csharp
+// CounterViewContrller.cs
+public class CounterViewController : MonoBehaviour
+{
+    private void Start()
+    {
+        OnCountChangedEvent.Register(OnCountChanged);
+
+        OnCountChanged();
+
+        transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+        {
+            CounterModel.Count++;
+        });
+
+        transform.Find("BtnSub").GetComponent<Button>().onClick.AddListener(() =>
+        {
+            CounterModel.Count--;
+        });
+    }
+
+    private void OnCountChanged()
+    {
+        transform.Find("CountText").GetComponent<Text>().text = CounterModel.Count.ToString();
+    }
+
+    private void OnDestroy()
+    {
+        OnCountChangedEvent.UnRegister(OnCountChanged);
+    }
+}
+```
+
+当然，这里存在着一点缺陷：之前定义的`Event`泛型中的委托的方法不支持携带参数。后续需要修改
+
+通过对比可知，通过委托回调或事件消息的方式可以缩减Controller中的代码量
+
+原先的逻辑问题在于：每次按钮点击之后，都需要Controller主动调用表现逻辑。当有很多数据的时候，会造成很多的代码调用，增加心智负担，同时会让Controller变得臃肿，增加维护成本
+
+因此，表现逻辑的实现，使用委托、事件的方式是优于主动调用的。具体来说，如果是单个数值变化，使用委托更加合适；如果是颗粒度较大的更新，使用事件更加合适
+
+### 可绑定属性BindableProperty
+
+现在，在Model中，任意一个`Count`就要写一个`mCount`变量和一个`OnCountChanged`委托，还要有值比较的代码。因此可以引入可绑定属性 BindableProperty。具体泛型代码如下：
+
+```csharp
+// BindableProperty.cs
+using System;
+
+namespace FrameworkDesign
+{
+    public class BindableProperty<T> where T : IEquatable<T> // 要求类型T支持Equal方法（可比较）
+    {
+        private T mValue = default(T); // 默认为0或null
+
+        public T Value
+        {
+            get => mValue;
+            set
+            {
+                if (!value.Equals(mValue))  // value是set方法中的隐式参数，代表新赋值
+                { 
+                    mValue = value;
+                    OnValueChanged?.Invoke(mValue);
+                }
+            }
+        }
+
+        public Action<T> OnValueChanged;
+    }
+}
+```
+
+然后尝试使用这个属性。首先修改Model部分的代码：
+
+```csharp
+// CounterViewContrller.cs
+public static class CounterModel
+{
+    public static BindableProperty<int> Count = new BindableProperty<int>() { Value = 0 };
+}
+```
+
+然后再将Controller的代码改回委托形式：
+
+```csharp
+// CounterViewContrller.cs
+public class CounterViewController : MonoBehaviour
+{
+    private void Start()
+    {
+        CounterModel.Count.OnValueChanged += OnCountChanged;
+
+        OnCountChanged(CounterModel.Count.Value);
+
+        transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+        {
+            CounterModel.Count.Value++;
+        });
+
+        transform.Find("BtnSub").GetComponent<Button>().onClick.AddListener(() =>
+        {
+            CounterModel.Count.Value--;
+        });
+    }
+
+    private void OnCountChanged(int newCount)
+    {
+        transform.Find("CountText").GetComponent<Text>().text = newCount.ToString();
+    }
+
+    private void OnDestroy()
+    {
+        CounterModel.Count.OnValueChanged -= OnCountChanged;
+    }
+}
+```
+
+使用这样的泛型就可以减少样本代码（除了类型一模一样的方法），可以减少代码的编写时间
+
+至此，`CounterApp`变成了一个数据驱动的应用
+
+从宏观分析：数据一般是一个项目的底层，而父子节点是一个自底向上的过程，因此Model和View可以看作底层和上层，子和父的关系。因此，表现逻辑就是一种自底向上的逻辑，这种逻辑自然可以使用委托或者事件
+
+现在尝试将原先的项目也使用BindableProperty进行优化。改变`GameModel`：
+
+```csharp
+// GameModel.cs
+namespace FrameworkDesign.Example
+{
+    public class GameModel
+    {
+        public static BindableProperty<int> KillCount = new BindableProperty<int>() { Value = 0 };
+
+        public static BindableProperty<int> Gold = new BindableProperty<int>() { Value = 0 };
+        public static BindableProperty<int> Score = new BindableProperty<int>() { Value = 0 };
+        public static BindableProperty<int> BestScore = new BindableProperty<int>() { Value = 0 };
+    }
+}
+```
+
+然后需要改变`Game`类以进行适配：
+
+```csharp
+// Game.cs
+private void OnEnemyKilled()
+{
+    GameModel.KillCount.Value++;
+
+    if (GameModel.KillCount.Value == 10)
+    {
+        GamePassEvent.Trigger();
+    }
+}
+// 其余略
+```
+
+再次观察结构图：
+
+<img src=".\StructureDesignPic\image-10.png" width="50%" height="50%"/>
+
+发现其实`KilledOneEnemyEvent`可以省略，改换为`GameModel.KilledCount`的变更事件，在点击Enemy后直接让`GameModel.KilledCount++`即可，代码改变：
+
+```csharp
+// Enemy.cs
+public class Enemy : MonoBehaviour
+{
+    private void OnMouseDown()
+    {
+        Destroy(gameObject);
+
+        GameModel.KillCount.Value++;
+    }
+}
+```
+
+同时，需要在`Game.cs`中监听`GanmeModel.KillCount`的变化：
+
+```csharp
+// Game.cs
+using UnityEngine;
+
+namespace FrameworkDesign.Example
+{
+    public class Game : MonoBehaviour
+    {
+        private void Awake()
+        {
+            GameStartEvent.Register(OnGameStart);
+            GameModel.KillCount.OnValueChanged += OnEnemyKilled;
+        }
+
+        private void OnEnemyKilled(int killCount)
+        {
+            if (killCount == 10)
+            {
+                GamePassEvent.Trigger();
+            }
+        }
+
+        private void OnGameStart()
+        {
+            transform.Find("Enemies").gameObject.SetActive(true);
+        }
+
+        private void OnDestroy()
+        {
+            GameStartEvent.UnRegister(OnGameStart);
+            GameModel.KillCount.OnValueChanged -= OnEnemyKilled;
+        }
+    }
+}
+```
+
+自此，结构图演化为：
+
+<img src=".\StructureDesignPic\image-12.png" width="50%" height="50%"/>
+
+明显，图中交互逻辑是KilledCount++的部分，而表现逻辑是KilledCountChanged的部分
+
+### 优化交互逻辑：引入Command
+
+目前，计数器的交互逻辑如下：
+
+```csharp
+transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+{
+    CounterModel.Count.Value++; // 交互逻辑改变Model值后自动调用表现逻辑
+});
+
+transform.Find("BtnSub").GetComponent<Button>().onClick.AddListener(() =>
+{
+    CounterModel.Count.Value--;
+});
+```
+
+但是正常开发中，交互逻辑中包含的代码量，操作量可能很大。而一个Controller如果包含过多交互逻辑，会变得臃肿。利用`Service`层抽象可以稍微缓解（相当于将所有交互逻辑方法另写在一个类中，而在Controller中只调用接口），但这种方法在方法过多时也会难以维护
+
+更好的解决方法，是引入Command：命令模式。简单理解就是本来应该用一个方法实现的逻辑，改成用一个对象实现，而这个对象中只有一个执行方法
+
+首先定义一个接口`ICommand`：
+
+```csharp
+// ICommand.cs
+namespace FrameworkDesign
+{
+    public interface ICommand
+    {
+        void Execute(); // 继承接口的类需要实现自己的执行方法
+    }
+}
+```
+
+然后要用继承这个接口的新类实现交互逻辑，以增加的交互举例：
+
+```csharp
+// AddCountCommand.cs
+using FrameworkDesign;
+
+namespace CounterApp
+{
+    public struct AddCountCommand : ICommand // 用struct性能更好一点，如果使用class，每次需要交互逻辑就要new，性能消耗大
+    {
+        public void Execute()
+        {
+            CounterModel.Count.Value++;
+        }
+    }
+}
+```
+
+最后更改原本的交互逻辑位置：
+```csharp
+transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+{
+    new AddCountCommand().Execute();
+});
+
+transform.Find("BtnSub").GetComponent<Button>().onClick.AddListener(() =>
+{
+    new SubCountCommand().Execute();
+});
+```
+
+使用Command符合读写分离原则。Command模式是逻辑的调用和执行是分离的。正常的方法是无法分离的。Command模式空间分离是因为调用的位置和执行的位置在不同文件，时间的分离就是调用之后Command过了一点点时间才被执行
+
+因为Command模式有调用和执行分离的特点，就可以用不同的数据结构组织Command的调用，例如队列和堆栈，就可以实现撤销功能
+
+目前Command可以分担Controller中的交互逻辑职责，分离复杂的交互逻辑代码
+
+### CounterApp的编辑器扩展版本
+
+目前为止，这个例子中的表现层包括UI和`ViewController`，而底层系统层则包含其他内容：`AddCountCommand`和`SubCountCommand`，`Model`和数据改变时的回调方法
+
+由于系统层内容是和UNITY引擎脱钩的（不需要`MonoBehaviour`），因此可以组合其他的表现层实现其他的功能。比如实现一个编辑器的扩展：
+
+```csharp
+// EditorCounterApp.cs
+using UnityEditor;
+using UnityEngine;
+
+namespace CounterApp.Editor
+{
+    public class EditorCounterApp : EditorWindow
+    {
+        [MenuItem("EditorCounterApp/Open")]
+        static void Open()
+        {
+            var window = GetWindow<EditorCounterApp>();
+            window.position = new Rect(100, 100, 400, 600);
+            window.titleContent = new GUIContent(nameof(EditorCounterApp));
+            window.Show();
+        }
+
+        private void OnGUI()
+        {
+            if (GUILayout.Button("+"))
+            {
+                new AddCountCommand().Execute();
+            }
+
+            GUILayout.Label(CounterModel.Count.Value.ToString());
+
+            if (GUILayout.Button("-"))
+            {
+                new SubCountCommand().Execute();
+            }
+        }
+    }
+}
+```
+
+也就是说，切换表现层非常方便，底层系统比较容易共享。如果交互逻辑直接在Controller当中实现，Controller和View有一定的耦合，这就代表交互逻辑不完全在系统层
+
+同时，直接用Command类对应操作比较易于理解，可读性比较强
+
+而且这套架构比较方便原型设计，因为原型设计时表现层比较简陋，但是如果使用这种架构，在构造原型时使用的系统层在添加美术时完全不需要改变
+
+而且可以用于分工：表现层和系统层。表现层到系统层用COMMAND，而系统层通过事件或者委托通知表现层
