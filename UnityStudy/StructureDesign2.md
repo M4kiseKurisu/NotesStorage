@@ -370,3 +370,259 @@ namespace FrameworkDesign.Example
     }
 }
 ```
+
+对计数器使用IOC容器：
+
+```csharp
+using FrameworkDesign;
+
+namespace CounterApp
+{
+    public class CounterApp
+    {
+        private static IOCContainer mCountainer;
+
+        static void MakeSureCountainer()
+        {
+            if (mCountainer == null)
+            {
+                mCountainer = new IOCContainer();
+                Init();
+            }
+        }
+
+        static void Init()
+        {
+            mCountainer.Register(new CounterModel());
+        }
+
+        public static T Get<T>() where T : class
+        {
+            MakeSureCountainer();
+
+            return mCountainer.Get<T>();
+        }
+    }
+}
+```
+
+更改计数器的模板引用代码：
+
+```csharp
+using System;
+using UnityEngine;
+using UnityEngine.UI;
+using FrameworkDesign;
+
+namespace CounterApp
+{
+    public class CounterViewController : MonoBehaviour
+    {
+        private CounterModel mCounterModel;
+
+        private void Start()
+        {
+            mCounterModel = CounterApp.Get<CounterModel>();
+
+            mCounterModel.Count.OnValueChanged += OnCountChanged;
+
+            OnCountChanged(mCounterModel.Count.Value);
+
+            transform.Find("BtnAdd").GetComponent<Button>().onClick.AddListener(() =>
+            {
+                new AddCountCommand().Execute();
+            });
+
+            transform.Find("BtnSub").GetComponent<Button>().onClick.AddListener(() =>
+            {
+                new SubCountCommand().Execute();
+            });
+        }
+
+        private void OnCountChanged(int newCount)
+        {
+            transform.Find("CountText").GetComponent<Text>().text = newCount.ToString();
+        }
+
+        private void OnDestroy()
+        {
+            mCounterModel.Count.OnValueChanged -= OnCountChanged;
+
+            mCounterModel = null;
+        }
+    }
+
+    public class CounterModel
+    {
+        public BindableProperty<int> Count = new BindableProperty<int>() { Value = 0 };
+    }
+}
+```
+
+更改加减指令：
+
+```csharp
+using FrameworkDesign;
+
+namespace CounterApp
+{
+    public struct AddCountCommand : ICommand
+    {
+        public void Execute()
+        {
+            CounterApp.Get<CounterModel>().Count.Value++;
+        }
+    }
+}
+```
+
+现在在例子游戏中加入IOC容器：
+
+```csharp
+using UnityEngine;
+
+namespace FrameworkDesign.Example
+{
+    public class PointGame
+    {
+        private static IOCContainer mCountainer;
+
+        static void MakeSureContainer()
+        {
+            if (mCountainer == null)
+            {
+                mCountainer = new IOCContainer();
+                Init();
+            }
+        }
+
+        static void Init()
+        {
+            mCountainer.Register(new GameModel());
+        }
+
+        public static T Get<T>() where T : class
+        {
+            MakeSureContainer();
+
+            return mCountainer.Get<T>();
+        }
+    }
+}
+```
+
+更改模板，取消单例模式：
+
+```csharp
+namespace FrameworkDesign.Example
+{
+    public class GameModel
+    {
+
+        public BindableProperty<int> KillCount = new BindableProperty<int>() { Value = 0 };
+
+        public BindableProperty<int> Gold = new BindableProperty<int>() { Value = 0 };
+
+        public BindableProperty<int> Score = new BindableProperty<int>() { Value = 0 };
+
+        public BindableProperty<int> BestScore = new BindableProperty<int>() { Value = 0 };
+    }
+}
+```
+
+更新在命令中的模板调用：
+
+```csharp
+namespace FrameworkDesign.Example
+{
+    public struct KillEnemyCommand : ICommand
+    {
+        public void Execute()
+        {
+            var gameModel = PointGame.Get<GameModel>();
+
+            gameModel.KillCount.Value++;
+
+            if (gameModel.KillCount.Value == 10)
+            {
+                GamePassEvent.Trigger();
+            }
+        }
+    }
+}
+```
+
+然而，在`CounterApp`和`PointGame`中对IOC容器的代码编写是几乎一致的，因此可以整合到样板代码中：
+
+```csharp
+namespace FrameworkDesign
+{
+    public abstract class Architecture<T> where T : Architecture<T>, new()
+    {
+        private static T mArchitecture;
+
+        static void MakeSureArchitecture()
+        {
+            if (mArchitecture == null)
+            {
+                mArchitecture = new T();
+                mArchitecture.Init();
+            }
+        }
+
+        protected abstract void Init();
+
+        private IOCContainer mCountainer = new IOCContainer();
+
+        public static T Get<T>() where T : class
+        {
+            MakeSureArchitecture();
+
+            return mArchitecture.mCountainer.Get<T>();
+        }
+
+        public void Register<T>(T instance)
+        {
+            MakeSureArchitecture();
+
+            mArchitecture.mCountainer.Register<T>(instance);
+        }
+    }
+}
+```
+
+在计数器中应用：
+
+```csharp
+using FrameworkDesign;
+
+namespace CounterApp
+{
+    public class CounterApp : Architecture<CounterApp>
+    {
+        protected override void Init()
+        {
+            Register(new CounterModel());
+        }
+    }
+}
+```
+
+在例子游戏中应用：
+
+```csharp
+namespace FrameworkDesign.Example
+{
+    public class PointGame : Architecture<PointGame>
+    {
+        protected override void Init()
+        {
+            Register(new GameModel());
+        }
+    }
+}
+```
+
+这里也体现了一个设计代码的思路：当使用继承关系进行代码提取时，需要思考子类要做什么（继承`Init`），父类要做什么（提供`Get`和`Register`）
+
+使用这种模式的好处是：为访问模块提供了限制（这个限制可以在`Architecture`中实现），同时可以使用一个主体类完成所有模块的注册工作，让项目底层模块一目了然
